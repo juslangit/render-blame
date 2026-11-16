@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "render_blame"
+version = "0.1.0"
+name = "Render Blame"
+tagline = "Find which objects and materials make your Cycles render slow"
+maintainer = "Luqman Hakeem"
+type = "add-on"
+website = "https://github.com/juslangit/render-blame"
+tags = ["Render", "Lighting"]
+
+blender_version_min = "5.0.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Saves a scene copy and test renders in the temp folder"

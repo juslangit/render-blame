@@ -1,0 +1,6 @@
+.env
+dist/
+spike/*.exr
+__pycache__/
+*.blend1
+.playwright-cli/
