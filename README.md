@@ -2,6 +2,8 @@
 
 **Find which objects and materials make your Cycles render slow.**
 
+![Render Blame](docs/listing/featured.png)
+
 Blender tells you a frame took 4 minutes. It doesn't tell you *why*. Render Blame
 does: press **Find What's Slow** and you get a ranked list —
 
@@ -12,6 +14,8 @@ does: press **Find What's Slow** and you get a ranked list —
 | Box | 15.3% | 1.1× |
 
 — plus a heatmap of where the time goes in the frame.
+
+<img src="docs/screenshots/render.png" width="49%"> <img src="docs/screenshots/heatmap.png" width="49%">
 
 ## How it works
 
