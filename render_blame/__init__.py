@@ -29,19 +29,28 @@ _job = {"proc": None, "dir": None, "scene": None}
 
 class RB_Row(bpy.types.PropertyGroup):
     name: StringProperty()
-    kind: StringProperty()           # OBJECT / MATERIAL / VOLUME
+    kind: StringProperty()           # OBJECT / MATERIAL / MODEL / VOLUME
     share: FloatProperty()           # of total render time, 0..1
     screen: FloatProperty()          # of the frame, 0..1
     density: FloatProperty()         # cost per pixel vs average
+    low: FloatProperty()             # volumes: lowest and highest of repeated measurements
+    high: FloatProperty()
     hint: StringProperty()
+    model: StringProperty()          # objects: readable name of the model it belongs to
+    label: StringProperty()          # models: readable name (row name stays the real object)
+    through: FloatProperty()         # share of the frame where it is seen through glass
+    fix: FloatProperty(default=-1.0)  # time saved with a plain material (-1 = not measured)
+    fix_low: FloatProperty()
+    fix_high: FloatProperty()
 
 
 class RB_Settings(bpy.types.PropertyGroup):
     group_by: EnumProperty(
         name="Group by",
         items=[("OBJECT", "Objects", "Cost per object"),
-               ("MATERIAL", "Materials", "Cost per material")],
-        default="OBJECT")
+               ("MATERIAL", "Materials", "Cost per material"),
+               ("MODEL", "Models", "Cost per model: each top-level parent with all its parts")],
+        default="MODEL")
     sort_by: EnumProperty(
         name="Sort by",
         items=[("SHARE", "Share of time", "Biggest share of the whole render first"),
@@ -54,8 +63,11 @@ class RB_Settings(bpy.types.PropertyGroup):
         name="Max samples", min=0, default=64,
         description="Cap the test render's samples (0 = use the scene's)")
     check_volumes: BoolProperty(
-        name="Measure volumes", default=True,
-        description="Volumes are invisible to the passes; measure each one by hiding it and rendering again (one extra test render per volume)")
+        name="Hidden costs", default=True,
+        description=("Some costs land on other pixels: volumes, glowing meshes that light the scene, "
+                     "glass and alpha that shadows pass through, mirrors. Measure them directly: hide each "
+                     "volume, and give each such model a plain material, then render again (two extra "
+                     "test renders per check, up to 10 checks)"))
     rows: CollectionProperty(type=RB_Row)
     index: IntProperty()
     status: StringProperty()
@@ -74,6 +86,12 @@ def _poll_job():
     if proc is None:
         return None
     if proc.poll() is None:
+        try:
+            with open(os.path.join(_job["dir"], "progress.txt")) as f:
+                _job["progress"] = f.read().strip()
+        except OSError:
+            pass
+        _redraw()
         return 0.5
     scene = bpy.data.scenes.get(_job["scene"])
     out_dir = _job["dir"]
@@ -101,14 +119,23 @@ def _poll_job():
 
 def _load_report(s, report):
     s.rows.clear()
-    for kind, key in (("OBJECT", "objects"), ("MATERIAL", "materials"), ("VOLUME", "volumes")):
+    for kind, key in (("OBJECT", "objects"), ("MATERIAL", "materials"),
+                      ("MODEL", "models"), ("VOLUME", "volumes")):
         for r in report.get(key, []):
             row = s.rows.add()
             row.name, row.kind = r["name"], kind
             row.share = r.get("share", 0.0)
             row.screen = r.get("screen", 0.0)
             row.density = r.get("density", 0.0)
+            row.low = r.get("low", row.share)
+            row.high = r.get("high", row.share)
             row.hint = r.get("hint", "")
+            row.model = r.get("model", "")
+            row.label = r.get("label", "")
+            row.fix = r.get("fix", -1.0)
+            row.fix_low = r.get("fix_low", 0.0)
+            row.fix_high = r.get("fix_high", 0.0)
+            row.through = r.get("through", 0.0)
     s.wall_seconds = report.get("wall_seconds", 0.0)
     s.probe_size = f"{report.get('width', 0)}x{report.get('height', 0)}"
     s.index = 0
@@ -157,7 +184,7 @@ class RB_OT_run(bpy.types.Operator):
         cmd = [bpy.app.binary_path, "-b", blend, "--factory-startup",
                "--python", _probe_script(), "--",
                out_dir, os.path.join(out_dir, "settings.json")]
-        _job.update(proc=subprocess.Popen(cmd), dir=out_dir, scene=context.scene.name)
+        _job.update(proc=subprocess.Popen(cmd), dir=out_dir, scene=context.scene.name, progress="starting")
         s.status = "running"
         s.rows.clear()
         bpy.app.timers.register(_poll_job, first_interval=0.5)
@@ -197,6 +224,11 @@ class RB_OT_select(bpy.types.Operator):
         for ob in context.view_layer.objects:
             if self.kind in {"OBJECT", "VOLUME"}:
                 hit = ob.name == self.name
+            elif self.kind == "MODEL":
+                top = ob
+                while top.parent is not None:
+                    top = top.parent
+                hit = top.name == self.name
             else:
                 hit = any(sl.material and sl.material.name == self.name
                           for sl in getattr(ob, "material_slots", []))
@@ -238,8 +270,15 @@ class RB_OT_heatmap(bpy.types.Operator):
 
 # ---------------------------------------------------------------- UI
 
+def _span(low, high):
+    """'19%' or '13-15%' for a measured range."""
+    lo, hi = round(max(0.0, low) * 100), round(max(0.0, high) * 100)
+    return f"{lo}%" if lo == hi else f"{lo}-{hi}%"
+
+
 def _visible_rows(s):
-    kinds = {"OBJECT": {"OBJECT", "VOLUME"}, "MATERIAL": {"MATERIAL", "VOLUME"}}[s.group_by]
+    kinds = {"OBJECT": {"OBJECT", "VOLUME"}, "MATERIAL": {"MATERIAL", "VOLUME"},
+             "MODEL": {"MODEL", "VOLUME"}}[s.group_by]
     rows = [r for r in s.rows if r.kind in kinds]
     if s.sort_by == "DENSITY":
         rows.sort(key=lambda r: (r.kind == "VOLUME", r.density), reverse=True)
@@ -258,7 +297,8 @@ class RB_PanelDraw:
         row = layout.row(align=True)
         row.scale_y = 1.4
         if _job["proc"] is not None:
-            row.operator("render_blame.cancel", icon="CANCEL", text="Measuring... Stop")
+            row.operator("render_blame.cancel", icon="CANCEL", text="Stop")
+            layout.label(text=f"Measuring: {_job.get('progress', '')}", icon="TIME")
         else:
             row.operator("render_blame.run", icon="VIEWZOOM")
         if context.scene.camera is None:
@@ -287,25 +327,47 @@ class RB_PanelDraw:
         sub.alignment = "RIGHT"
         sub.label(text="Time    Per pixel")
         for r in _visible_rows(s)[:15]:
-            line = box.row(align=True)
-            hot = r.kind == "VOLUME" or r.density >= HOT
-            icon = {"OBJECT": "OBJECT_DATA", "MATERIAL": "MATERIAL",
+            line = box.split(factor=0.6, align=True)
+            fixes = r.fix >= 0.0
+            hot = r.kind == "VOLUME" or r.density >= HOT or (fixes and r.fix >= 0.05)
+            icon = {"OBJECT": "OBJECT_DATA", "MATERIAL": "MATERIAL", "MODEL": "OUTLINER_COLLECTION",
                     "VOLUME": "OUTLINER_DATA_VOLUME"}[r.kind]
             if r.name == BACKGROUND:
                 icon = "WORLD"
             left = line.row()
             left.alignment = "LEFT"
-            op = left.operator("render_blame.select", text=r.name, icon=icon, emboss=False)
+            label = r.name
+            if r.kind == "OBJECT" and r.model and r.model != r.name:
+                label = f"{r.name}  ({r.model})"  # 'Object_2' alone means nothing
+            elif r.kind == "MODEL" and r.label:
+                label = r.label
+            op = left.operator("render_blame.select", text=label, icon=icon, emboss=False)
             op.name, op.kind = r.name, r.kind
             num = line.row()
             num.alignment = "RIGHT"
             num.alert = hot
-            dens = "hidden test" if r.kind == "VOLUME" else f"{r.density:.1f}x"
-            num.label(text=f"{r.share * 100:4.1f}%   {dens}")
+            if r.kind == "VOLUME":
+                # measured by hiding it, so show the spread of the repeats
+                num.label(text=f"{_span(r.low, r.high)}   --")
+            else:
+                num.label(text=f"{r.share * 100:4.1f}%   {r.density:.1f}x")
             if r.hint and hot:
                 h = box.row()
                 h.separator(factor=3)
                 h.label(text=r.hint, icon="INFO")
+            if fixes and r.fix >= 0.02:
+                h = box.row()
+                h.separator(factor=3)
+                h.alert = r.fix >= 0.05
+                h.label(text=f"plain material saves {_span(r.fix_low, r.fix_high)}",
+                        icon="TIME")
+            if r.through > 0.002 and r.through > r.screen:
+                h = box.row()
+                h.separator(factor=3)
+                h.label(text="seen through glass: time is on the glass", icon="INFO")
+        if any(r.kind == "VOLUME" for r in s.rows):
+            note = layout.row()
+            note.label(text="Volume time is also in the rows behind it", icon="INFO")
 
         foot = layout.row()
         foot.label(text=f"Test render {s.probe_size}, {s.wall_seconds:.1f}s on CPU")

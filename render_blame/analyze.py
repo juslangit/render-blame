@@ -68,41 +68,78 @@ def find(layers, suffix):
     return None
 
 
-def attribute(layers, cost, kind, manifest):
+def _ranks(layers, kind):
+    """[(ids, coverage)] for every Cryptomatte rank of this kind."""
+    out = []
+    for base in sorted({ch.rsplit(".", 1)[0] for ch in layers if f".{kind}" in ch}):
+        for id_ch, cov_ch in (("r", "g"), ("b", "a")):  # two ranks per RGBA layer
+            ids, cov = layers.get(f"{base}.{id_ch}"), layers.get(f"{base}.{cov_ch}")
+            if ids is not None and cov is not None:
+                out.append((ids.astype(np.float32), cov))
+    return out
+
+
+def attribute(layers, cost, kind, manifest, see_through=()):
     """Share every pixel's cost among the ids that cover it.
 
-    Returns {name: (cost, coverage_pixels)}; uncovered cost goes to BACKGROUND.
+    `see_through` names glass / transmissive / alpha-cut objects or materials.
+    Cryptomatte records them *and* whatever is seen through them on the same
+    pixel; hiding the thing behind the glass saves nothing (the pixel still
+    goes through glass), so on such pixels the see-through ids own the whole
+    cost and the others are only counted as seen through.
+
+    Returns {name: (cost, coverage_pixels, seen_through_pixels)};
+    uncovered cost goes to BACKGROUND.
     """
-    pairs = sorted({ch.rsplit(".", 1)[0] for ch in layers if f".{kind}" in ch})
+    ranks = _ranks(layers, kind)
+    owner_ids = np.array([manifest[n] for n in see_through if n in manifest], dtype=np.float32)
+    owner_cov = np.zeros_like(cost)
+    if owner_ids.size:
+        for ids, cov in ranks:
+            owner_cov += np.where(np.isin(ids, owner_ids), cov, 0.0)
+    glassy = owner_cov > 0
     by_id = {}
     covered = np.zeros_like(cost)
-    for base in pairs:  # e.g. ViewLayer.CryptoObject00 holds two (id, coverage) ranks
-        for id_ch, cov_ch in (("r", "g"), ("b", "a")):
-            ids = layers.get(f"{base}.{id_ch}")
-            cov = layers.get(f"{base}.{cov_ch}")
-            if ids is None or cov is None:
-                continue
-            ids = ids.astype(np.float32)
-            mask = cov > 0
-            for u in np.unique(ids[mask]):
-                m = mask & (ids == u)
-                w = cov[m]
-                c, p = by_id.get(float(u), (0.0, 0.0))
-                by_id[float(u)] = (c + float((cost[m] * w).sum()), p + float(w.sum()))
-                covered[m] += w
+    for ids, cov in ranks:
+        mask = cov > 0
+        for u in np.unique(ids[mask]):
+            m = mask & (ids == u)
+            if u in owner_ids:
+                w = np.where(glassy[m], cov[m] / np.maximum(owner_cov[m], 1e-9), cov[m])
+                through = 0.0
+            else:
+                w = np.where(glassy[m], 0.0, cov[m])
+                through = float(cov[m][glassy[m]].sum())
+            c, p, t = by_id.get(float(u), (0.0, 0.0, 0.0))
+            by_id[float(u)] = (c + float((cost[m] * w).sum()), p + float(w.sum()), t + through)
+            covered[m] += w
     names = {float(v): n for n, v in manifest.items()}
     result = {}
-    for u, (c, p) in by_id.items():
+    for u, (c, p, t) in by_id.items():
         name = names.get(u, f"(unknown {u:.3g})")
-        oc, op = result.get(name, (0.0, 0.0))
-        result[name] = (oc + c, op + p)
+        oc, op, ot = result.get(name, (0.0, 0.0, 0.0))
+        result[name] = (oc + c, op + p, ot + t)
     rest = np.clip(1.0 - covered, 0.0, 1.0)
-    result[BACKGROUND] = (float((cost * rest).sum()), float(rest.sum()))
+    rest[glassy] = 0.0  # the background seen through glass belongs to the glass too
+    result[BACKGROUND] = (float((cost * rest).sum()), float(rest.sum()), 0.0)
     return result
 
 
-def breakdown(path):
-    """Full report dict from a probe EXR."""
+def total_cost(path):
+    """Sum of the Render Time pass of a probe EXR."""
+    layers, _ = read_exr(path)
+    cost = find(layers, "Render Time.X")
+    if cost is None:
+        raise RuntimeError("No Render Time pass in the probe render (it is CPU-only).")
+    return float(cost.sum())
+
+
+def breakdown(path, see_through=None):
+    """Full report dict from a probe EXR.
+
+    see_through: {"CryptoObject": names, "CryptoMaterial": names} - see attribute().
+    """
+    see_through = see_through or {}
     layers, attrs = read_exr(path)
     cost = find(layers, "Render Time.X")
     if cost is None:
@@ -118,14 +155,16 @@ def breakdown(path):
             report[key] = []
             continue
         rows = []
-        for name, (c, p) in attribute(layers, cost, kind, man[kind]).items():
-            if p < 0.5 and c / total < 0.001:
+        for name, (c, p, t) in attribute(layers, cost, kind, man[kind],
+                                         see_through.get(kind, ())).items():
+            if p < 0.5 and t < 0.5 and c / total < 0.001:
                 continue
             rows.append({
                 "name": name,
                 "share": c / total,                     # of total render time
                 "screen": p / npx,                      # of the frame it covers
                 "density": (c / p / avg) if p else 0.0,  # x the average pixel
+                "through": t / npx,                     # of the frame, seen through glass
             })
         rows.sort(key=lambda r: r["share"], reverse=True)
         report[key] = rows

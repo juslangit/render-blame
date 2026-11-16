@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "render_blame"
-version = "0.1.0"
+version = "0.1.1"
 name = "Render Blame"
 tagline = "Find which objects and materials make your Cycles render slow"
 maintainer = "Luqman Hakeem"

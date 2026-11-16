@@ -11,6 +11,10 @@ def check(ok, msg):
     print(("PASS " if ok else "FAIL ") + msg); ok or fails.append(msg)
 
 s = bpy.context.scene.render_blame
+# hidden in the viewport while working, but still rendered: must still be measured
+fog_ob = bpy.data.objects["FogCube"]
+fog_ob.hide_set(True)
+fog_ob.hide_viewport = True
 before = (bpy.context.scene.render.resolution_percentage, bpy.context.scene.cycles.samples,
           bpy.context.scene.cycles.device, bpy.context.view_layer.cycles.pass_render_time)
 assert bpy.ops.render_blame.run() == {"FINISHED"}
@@ -27,6 +31,7 @@ check("glass" in (glass.hint if glass else ""), "glass ball hint mentions glass"
 check(("MATERIAL", "M_Glass") in rows, "materials reported")
 fog = rows.get(("VOLUME", "FogCube"))
 check(fog is not None and fog.share > 0.03, f"fog cube measured by hiding it ({fog and fog.share*100:.1f}%)")
+check(fog is not None and fog.low <= fog.share <= fog.high, f"fog cube range {fog and fog.low*100:.1f}-{fog and fog.high*100:.1f}% holds its middle value")
 check("Render Blame Heatmap" in bpy.data.images, "heatmap loaded")
 after = (bpy.context.scene.render.resolution_percentage, bpy.context.scene.cycles.samples,
          bpy.context.scene.cycles.device, bpy.context.view_layer.cycles.pass_render_time)

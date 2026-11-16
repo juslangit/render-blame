@@ -22,20 +22,28 @@ does: press **Find What's Slow** and you get a ranked list —
 1. Your file is saved as a **copy** to the temp folder; your scene is never changed.
 2. A background Blender renders that copy small (25% size, ≤64 samples by default)
    with Cycles' per-pixel **Render Time** pass and **Cryptomatte** object and
-   material IDs, and splits the time between whatever covers each pixel.
-3. Volumes write no IDs, so their cost hides behind them. Render Blame measures each
-   volume the honest way: it hides it, renders again, and reports the time that
-   disappeared.
+   material IDs, and splits the time between whatever covers each pixel. Glass owns
+   what is seen through it: the ship inside a bottle isn't blamed for the bottle's cost.
+3. **Hidden costs** — some time lands on *other* pixels: volumes, glowing meshes that
+   light the scene, glass and alpha that shadows pass through, mirrors. Render Blame
+   measures these directly: it hides each volume, and gives each such model a plain
+   material, renders again, and reports the time that disappeared
+   ("plain material saves 18–19%").
 
-Two numbers per row:
-- **Share of time** — how much of the whole render this costs. Big things on screen
-  win here even when they're cheap.
+Three ways to read it: **Models** (default — an imported model's parts summed, so
+"Object_2" becomes "socha_100kuw"), **Objects** and **Materials**. Two numbers per row:
+- **Share of time** — the time spent on its pixels. Big things on screen win here even
+  when they're cheap. It is not what deleting it would save: hide a wall and the wall
+  behind it costs the same.
 - **Cost per pixel** — how expensive each of its pixels is compared with the average.
-  This is the one that finds the culprit: a small glass ball at 3× is the thing to fix.
+  This is the one that finds the culprit: a small glass object at 3× is the thing to fix.
 
 The test render always runs on the **CPU**, because Cycles only writes the Render
 Time pass there. That doesn't matter for the answer — it's the *relative* cost of
 each object you want — and it keeps Blender free while it measures.
+
+**Checked against reality** on five Sketchfab models: predictions within a few percent
+of the time actually saved — see [tests/REALWORLD.md](tests/REALWORLD.md).
 
 ## Install
 
